@@ -134,7 +134,15 @@ python -m gog_disk_monitor.cli --headless
 python -m gog_disk_monitor.cli --scan-once
 ```
 
-### 4. Querying & Managing Installed Games
+### 4. GOG Game Disk Generator & Setup Utility (PyQt / PySide GUI)
+Create and deploy autorun-ready GOG disk media (game executable, custom icon, and JSON descriptor):
+```bash
+python GUI_setup.py
+# or if installed via pip:
+gog-disk-setup
+```
+
+### 5. Querying & Managing Installed Games
 ```bash
 # List all recorded game installations
 python -m gog_disk_monitor.cli --list-installed
