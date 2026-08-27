@@ -460,8 +460,10 @@ class TrayManager:
                 )
                 self._thread.start()
                 logger.info("TrayManager started detached in background thread.")
-            else:
-                self._run_icon_loop(setup)
+                return
+
+        # If not detached, run outside self._lock to avoid blocking other threads
+        self._run_icon_loop(setup)
 
     def _run_icon_loop(self, setup: Optional[Callable[[Any], None]] = None) -> None:
         """Internal execution loop for pystray Icon."""

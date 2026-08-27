@@ -17,6 +17,8 @@ from .config import (
     parse_disk_config,
     find_disk_icon,
     normalize_disk_root,
+    sanitize_argument,
+    parse_and_sanitize_arguments,
 )
 from .state import (
     InstalledGameRecord,
@@ -57,6 +59,8 @@ __all__ = [
     "parse_disk_config",
     "find_disk_icon",
     "normalize_disk_root",
+    "sanitize_argument",
+    "parse_and_sanitize_arguments",
     "InstalledGameRecord",
     "StateStore",
     "DriveInfo",

@@ -156,6 +156,35 @@ class TestProcessRunnerSetupExecution(unittest.TestCase):
         )
         self.assertEqual(code, 0)
 
+    def test_run_setup_with_quoted_dir_argument_strips_quotes_for_subprocess(self):
+        """
+        Verify that a config containing quoted arguments (like /dir=\"C:\\Path\" or /dir=\"C:\\GOG Games\\W3\")
+        is parsed and passed to a subprocess correctly, without the literal quotes becoming part of the path.
+        """
+        arg_script = self.base_path / "check_quoted_args.py"
+        arg_script.write_text(
+            "import sys\n"
+            "# Assert exact received argument without internal literal quotes\n"
+            "assert sys.argv[1] == r'/dir=C:\\Path', f'Expected /dir=C:\\\\Path, got {sys.argv[1]!r}'\n"
+            "assert sys.argv[2] == r'/DIR=C:\\GOG Games\\Witcher', f'Expected /DIR=C:\\\\GOG Games\\\\Witcher, got {sys.argv[2]!r}'\n"
+            "# Verify no literal double-quote character is present inside the path\n"
+            "assert '\"' not in sys.argv[1], f'Literal quote found in {sys.argv[1]}'\n"
+            "assert '\"' not in sys.argv[2], f'Literal quote found in {sys.argv[2]}'\n"
+            "sys.exit(0)\n",
+            encoding="utf-8",
+        )
+
+        code = ProcessRunner.run_setup(
+            sys.executable,
+            args=[
+                str(arg_script),
+                r'/dir="C:\Path"',
+                r'/DIR="C:\GOG Games\Witcher"',
+            ],
+            cwd=str(self.base_path),
+        )
+        self.assertEqual(code, 0)
+
     def test_run_setup_timeout_handling(self):
         """Raises subprocess.TimeoutExpired and terminates child process if execution times out."""
         slow_script = self.base_path / "slow_setup.py"

@@ -322,6 +322,53 @@ class TestAppInsertionInstallFlow(unittest.TestCase):
         self.assertEqual(result.get("exit_code"), 42)
         self.assertFalse(self.state_store.is_installed("heroes_of_might_and_magic_3"))
 
+    def test_first_insertion_with_quoted_arguments_in_config(self):
+        """
+        Verify that when a config contains quoted arguments (like /dir=\"C:\\Path\"),
+        the application parses the config and executes setup successfully without literal quotes in path.
+        """
+        # Create mock installer script that validates its arguments
+        check_script = self.disk_folder / "setup_quoted.bat"
+        installed_game_dir = self.install_root / "heroes3_quoted"
+        installed_game_exe = installed_game_dir / "heroes3.exe"
+
+        batch_content = (
+            f"@echo off\n"
+            f"mkdir \"{installed_game_dir}\" 2>nul\n"
+            f"echo mock_game_binary > \"{installed_game_exe}\"\n"
+            f"exit /b 0\n"
+        )
+        check_script.write_text(batch_content, encoding="utf-8")
+
+        self.config_data["game_id"] = "homm3_quoted"
+        self.config_data["setup"]["executable"] = "setup_quoted.bat"
+        self.config_data["setup"]["arguments"] = [
+            r'/dir="C:\GOG Games\Heroes 3"',
+            "/SILENT",
+        ]
+        self.config_data["setup"]["default_install_subdir"] = "heroes3_quoted"
+        (self.disk_folder / "gog_game.json").write_text(json.dumps(self.config_data), encoding="utf-8")
+
+        app = GOGDiskMonitorApp(
+            state_store=self.state_store,
+            auto_confirm=True,
+            headless=True,
+            install_root=str(self.install_root),
+        )
+
+        with patch("gog_disk_monitor.launcher.ProcessRunner.run_setup", wraps=ProcessRunner.run_setup) as spy_setup:
+            result = app.handle_drive_inserted(self.drive_info)
+
+            self.assertEqual(result.get("action"), "installed")
+            self.assertEqual(result.get("game_id"), "homm3_quoted")
+            self.assertTrue(self.state_store.is_installed("homm3_quoted", verify_executable=True))
+
+            # Verify that run_setup was called with sanitized arguments
+            spy_setup.assert_called_once()
+            called_args = spy_setup.call_args[1].get("args") or spy_setup.call_args[0][1]
+            self.assertIn(r"/dir=C:\GOG Games\Heroes 3", called_args)
+            self.assertNotIn(r'/dir="C:\GOG Games\Heroes 3"', called_args)
+
 
 class TestAppInsertionLaunchFlow(unittest.TestCase):
     """Integration tests for the Second Insertion (Auto-Launch) branch in GOGDiskMonitorApp."""
@@ -702,6 +749,178 @@ class TestAppLifecycleAndThreading(unittest.TestCase):
             self.assertTrue(success)
             mock_open.assert_called_once_with(self.store.state_file_path.parent)
 
+    def test_simulated_drive_insertion_detected_and_processed_while_tray_running(self):
+        """
+        Integration test verifying that simulated drive insertion events are successfully
+        detected and processed in real time while the system tray application is actively running.
+        """
+        # Create a mock game disc directory
+        disc_dir = self.base_path / "mock_bg_disc"
+        disc_dir.mkdir(parents=True, exist_ok=True)
+        setup_exe = disc_dir / "setup.bat"
+        setup_exe.write_text("@echo off\nexit /b 0\n", encoding="utf-8")
+
+        cfg = {
+            "schema_version": "1.0",
+            "game_id": "bg_proc_game",
+            "title": "Background Processing Game",
+            "version": "1.0.0",
+            "setup": {
+                "executable": "setup.bat",
+                "arguments": ["/SILENT"],
+                "default_install_subdir": "bg_proc",
+            },
+            "launcher": {
+                "executable": "game.exe",
+            },
+        }
+        (disc_dir / "gog_game.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+        # Mock detector to simulate dynamic drive insertion
+        mock_detector = MagicMock(spec=WindowsDriveDetector)
+        mock_detector.get_logical_drives_mask.return_value = 0b100  # C: only initially
+        mock_detector.get_drive_letters_from_mask.return_value = set()
+        mock_detector.inspect_drive.return_value = DriveInfo(
+            letter="Z:",
+            drive_type="REMOVABLE",
+            root_path=f"{disc_dir}\\",
+            is_ready=True,
+        )
+
+        monitor = DriveMonitor(
+            poll_interval=0.05,
+            detector=mock_detector,
+            auto_suppress_errors=False,
+        )
+
+        app = GOGDiskMonitorApp(
+            state_store=self.store,
+            drive_monitor=monitor,
+            poll_interval=0.05,
+            auto_confirm=True,
+            headless=False,  # Active tray manager
+            install_root=str(self.base_path / "installs"),
+        )
+
+        try:
+            # Start app with background monitoring and active system tray
+            app.start(block=False)
+            self.assertTrue(app.is_running)
+            self.assertTrue(app.drive_monitor.is_running())
+            self.assertTrue(app.tray.is_running())
+
+            # Verify game is not installed yet
+            self.assertFalse(self.store.is_installed("bg_proc_game"))
+
+            # Simulate drive insertion while tray is actively running
+            mock_detector.get_logical_drives_mask.return_value = (1 << 25)  # Z:
+            mock_detector.get_drive_letters_from_mask.return_value = {"Z:"}
+
+            # Wait for background monitoring loop to detect and process event in real-time
+            start_time = time.time()
+            max_wait = 4.0
+            processed = False
+            while time.time() - start_time < max_wait:
+                if self.store.is_installed("bg_proc_game"):
+                    processed = True
+                    break
+                time.sleep(0.05)
+
+            self.assertTrue(
+                processed,
+                "Drive insertion was not processed in real time while tray was running.",
+            )
+
+            # Verify system tray is still actively running and responsive
+            self.assertTrue(app.tray.is_running())
+            self.assertEqual(app.tray.get_status(), "Installed: Background Processing Game")
+
+        finally:
+            app.stop()
+            self.assertFalse(app.is_running)
+            self.assertFalse(app.drive_monitor.is_running())
+
+    def test_drive_insertion_processed_in_real_time_when_app_started_with_block_true(self):
+        """
+        Verify that when GOGDiskMonitorApp is started with block=True, the drive
+        monitoring engine runs continuously in the background and processes drive
+        insertions in real time without being blocked by the tray main execution loop.
+        """
+        disc_dir = self.base_path / "mock_block_disc"
+        disc_dir.mkdir(parents=True, exist_ok=True)
+        setup_exe = disc_dir / "setup.bat"
+        setup_exe.write_text("@echo off\nexit /b 0\n", encoding="utf-8")
+
+        cfg = {
+            "schema_version": "1.0",
+            "game_id": "block_loop_game",
+            "title": "Block Loop Game",
+            "version": "1.0",
+            "setup": {"executable": "setup.bat"},
+            "launcher": {"executable": "game.exe"},
+        }
+        (disc_dir / "gog_game.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+        mock_detector = MagicMock(spec=WindowsDriveDetector)
+        mock_detector.get_logical_drives_mask.return_value = 0
+        mock_detector.get_drive_letters_from_mask.return_value = set()
+        mock_detector.inspect_drive.return_value = DriveInfo(
+            letter="Y:",
+            drive_type="REMOVABLE",
+            root_path=f"{disc_dir}\\",
+            is_ready=True,
+        )
+
+        monitor = DriveMonitor(
+            poll_interval=0.05,
+            detector=mock_detector,
+            auto_suppress_errors=False,
+        )
+
+        app = GOGDiskMonitorApp(
+            state_store=self.store,
+            drive_monitor=monitor,
+            poll_interval=0.05,
+            auto_confirm=True,
+            headless=False,
+            install_root=str(self.base_path / "installs"),
+        )
+
+        # Run app.start(block=True) in a separate thread simulating the main execution thread
+        app_thread = threading.Thread(target=lambda: app.start(block=True), daemon=True)
+        app_thread.start()
+
+        try:
+            # Wait for app to become active
+            start_time = time.time()
+            while not app.is_running and time.time() - start_time < 3.0:
+                time.sleep(0.05)
+
+            self.assertTrue(app.is_running)
+            self.assertTrue(app.drive_monitor.is_running())
+
+            # Simulate drive insertion
+            mock_detector.get_logical_drives_mask.return_value = (1 << 24)  # Y:
+            mock_detector.get_drive_letters_from_mask.return_value = {"Y:"}
+
+            # Verify insertion is processed in real time
+            start_time = time.time()
+            max_wait = 4.0
+            detected = False
+            while time.time() - start_time < max_wait:
+                if self.store.is_installed("block_loop_game"):
+                    detected = True
+                    break
+                time.sleep(0.05)
+
+            self.assertTrue(detected, "Drive insertion was blocked while app was running with block=True")
+
+        finally:
+            app.stop()
+            app_thread.join(timeout=3.0)
+            self.assertFalse(app_thread.is_alive())
+            self.assertFalse(app.is_running)
+
 
 class TestAppEdgeCasesAndErrorHandling(unittest.TestCase):
     """Tests for edge cases, exceptions during setup/launch, and custom icon paths."""
@@ -837,6 +1056,152 @@ class TestAppEdgeCasesAndErrorHandling(unittest.TestCase):
             mock_launch.assert_called_once()
             _, kwargs = mock_launch.call_args
             self.assertEqual(kwargs.get("cwd"), str(sub_work_dir.resolve()))
+
+    def test_multi_disc_flow_with_spaces_and_unicode_under_active_tray(self):
+        """
+        Integration test verifying a multi-disc flow (Disc 1 install + Disc 2 launch)
+        with paths containing spaces and non-ASCII Unicode characters while the system tray
+        is actively running.
+        """
+        install_dest = self.base_path / "GOG Gry" / "Wiedźmin 3 Dziki Gon™"
+        install_dest.mkdir(parents=True, exist_ok=True)
+        game_binary = install_dest / "bin" / "wiedźmin3.exe"
+        game_binary.parent.mkdir(parents=True, exist_ok=True)
+
+        # Create Disc 1 mock
+        disc1_dir = self.base_path / "disc1"
+        disc1_dir.mkdir(parents=True, exist_ok=True)
+        setup1_script = disc1_dir / "instaluj.bat"
+        setup1_script.write_text(
+            f"@echo off\nchcp 65001 >nul\nmkdir \"{game_binary.parent}\" 2>nul\necho mock_binary > \"{game_binary}\"\nexit /b 0\n",
+            encoding="utf-8",
+        )
+
+        cfg_disc1 = {
+            "schema_version": "1.0",
+            "game_id": "witcher_3_pl",
+            "title": "Wiedźmin 3: Dziki Gon™",
+            "version": "4.04",
+            "setup": {
+                "executable": "instaluj.bat",
+                "arguments": [
+                    f'/dir="{install_dest}"',
+                    "/SILENT",
+                ],
+                "default_install_subdir": "Wiedźmin 3 Dziki Gon™",
+            },
+            "launcher": {
+                "executable": "bin/wiedźmin3.exe",
+                "arguments": ["-dx12", "-lang=pl-PL"],
+            },
+            "disk_info": {
+                "disc_number": 1,
+                "total_discs": 2,
+                "label": "W3_DISC1",
+            },
+        }
+        (disc1_dir / "gog_game.json").write_text(json.dumps(cfg_disc1), encoding="utf-8")
+
+        # Create Disc 2 mock
+        disc2_dir = self.base_path / "disc2"
+        disc2_dir.mkdir(parents=True, exist_ok=True)
+        cfg_disc2 = dict(cfg_disc1)
+        cfg_disc2["disk_info"] = {
+            "disc_number": 2,
+            "total_discs": 2,
+            "label": "W3_DISC2",
+        }
+        (disc2_dir / "gog_game.json").write_text(json.dumps(cfg_disc2), encoding="utf-8")
+
+        # Mock detector simulating Disc 1 followed by Disc 2
+        mock_detector = MagicMock(spec=WindowsDriveDetector)
+        mock_detector.get_logical_drives_mask.return_value = 0
+        mock_detector.get_drive_letters_from_mask.return_value = set()
+
+        monitor = DriveMonitor(
+            poll_interval=0.05,
+            detector=mock_detector,
+            auto_suppress_errors=False,
+        )
+
+        app = GOGDiskMonitorApp(
+            state_store=self.store,
+            drive_monitor=monitor,
+            poll_interval=0.05,
+            auto_confirm=True,
+            headless=False,
+            install_root=str(self.base_path / "GOG Gry"),
+        )
+
+        app.start(block=False)
+        try:
+            self.assertTrue(app.is_running)
+            self.assertTrue(app.tray.is_running())
+
+            # Step 1: Insert Disc 1 (Install Flow)
+            disc1_info = DriveInfo(
+                letter="V:",
+                drive_type="CDROM",
+                volume_name="W3_DISC1",
+                root_path=f"{disc1_dir}\\",
+                is_ready=True,
+            )
+            mock_detector.inspect_drive.return_value = disc1_info
+            mock_detector.get_logical_drives_mask.return_value = (1 << 21)  # V:
+            mock_detector.get_drive_letters_from_mask.return_value = {"V:"}
+
+            # Wait for Disc 1 to install
+            start = time.time()
+            installed = False
+            while time.time() - start < 4.0:
+                if self.store.is_installed("witcher_3_pl", verify_executable=True):
+                    installed = True
+                    break
+                time.sleep(0.05)
+
+            self.assertTrue(installed, "Disc 1 was not installed in real time.")
+            record = self.store.get_game("witcher_3_pl")
+            self.assertEqual(record.title, "Wiedźmin 3: Dziki Gon™")
+            self.assertEqual(record.last_disk_label, "W3_DISC1")
+
+            # Step 2: Remove Disc 1
+            mock_detector.get_logical_drives_mask.return_value = 0
+            mock_detector.get_drive_letters_from_mask.return_value = set()
+            time.sleep(0.1)
+
+            # Step 3: Insert Disc 2 (Auto-Launch Flow)
+            disc2_info = DriveInfo(
+                letter="V:",
+                drive_type="CDROM",
+                volume_name="W3_DISC2",
+                root_path=f"{disc2_dir}\\",
+                is_ready=True,
+            )
+            mock_detector.inspect_drive.return_value = disc2_info
+            mock_detector.get_logical_drives_mask.return_value = (1 << 21)  # V:
+            mock_detector.get_drive_letters_from_mask.return_value = {"V:"}
+
+            mock_proc = MagicMock()
+            mock_proc.pid = 55443
+            with patch("gog_disk_monitor.launcher.ProcessRunner.launch_game", return_value=mock_proc) as mock_launch:
+                start = time.time()
+                launched = False
+                while time.time() - start < 4.0:
+                    if mock_launch.called:
+                        launched = True
+                        break
+                    time.sleep(0.05)
+
+                self.assertTrue(launched, "Disc 2 insertion did not auto-launch game.")
+                mock_launch.assert_called_once()
+                # Verify state updated with Disc 2 info and launch timestamp
+                rec2 = self.store.get_game("witcher_3_pl")
+                self.assertIsNotNone(rec2.last_launched_at)
+                self.assertEqual(rec2.last_disk_label, "W3_DISC2")
+
+        finally:
+            app.stop()
+            self.assertFalse(app.is_running)
 
 
 if __name__ == "__main__":

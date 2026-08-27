@@ -113,6 +113,16 @@ class ProcessRunner:
             return False
 
     @classmethod
+    def sanitize_argument(cls, arg: Any) -> str:
+        """
+        Sanitizes an individual argument string, stripping extraneous quotes from
+        enclosing strings and key=value switches (e.g. /dir="C:\\Path" -> /dir=C:\\Path)
+        so that Windows subprocess execution passes clean paths without literal quotes.
+        """
+        from .config import sanitize_argument
+        return sanitize_argument(arg)
+
+    @classmethod
     def run_setup(
         cls,
         setup_exe_path: str,
@@ -155,7 +165,7 @@ class ProcessRunner:
         if not effective_cwd or not os.path.isdir(effective_cwd):
             effective_cwd = os.path.dirname(resolved_path)
 
-        cmd_args = [str(a) for a in (args or [])]
+        cmd_args = [cls.sanitize_argument(a) for a in (args or []) if a is not None]
 
         # Windows batch script (.bat/.cmd) execution handling
         is_batch = cls._is_windows_batch_file(resolved_path)
@@ -271,7 +281,7 @@ class ProcessRunner:
         if not effective_cwd or not os.path.isdir(effective_cwd):
             effective_cwd = os.path.dirname(resolved_path)
 
-        cmd_args = [str(a) for a in (args or [])]
+        cmd_args = [cls.sanitize_argument(a) for a in (args or []) if a is not None]
         is_batch = cls._is_windows_batch_file(resolved_path)
         use_shell = shell if shell is not None else False
 

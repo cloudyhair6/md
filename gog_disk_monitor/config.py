@@ -11,9 +11,108 @@ from dataclasses import dataclass, field
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 logger = logging.getLogger("gog_disk_monitor.config")
+
+
+def _strip_quotes(s: str) -> str:
+    """Helper to strip any matched outer quotes or escaped quotes repeatedly."""
+    s = s.strip()
+    while True:
+        if len(s) >= 4 and (
+            (s.startswith('\\"') and s.endswith('\\"'))
+            or (s.startswith("\\'") and s.endswith("\\'"))
+        ):
+            s = s[2:-2].strip()
+        elif len(s) >= 2 and (
+            (s.startswith('"') and s.endswith('"'))
+            or (s.startswith("'") and s.endswith("'"))
+        ):
+            s = s[1:-1].strip()
+        else:
+            break
+    return s
+
+
+def sanitize_argument(arg: Any) -> str:
+    """
+    Sanitizes a command-line argument by stripping extraneous quotes from
+    enclosing strings and key=value options (e.g. /dir="C:\\Path" -> /dir=C:\\Path).
+
+    On Windows, passing literal quotes inside arguments like '/dir="C:\\Path"'
+    causes subprocess (via list2cmdline) to escape quotes as '\\"', which installer
+    parsers (such as Inno Setup) interpret as literal invalid path characters,
+    causing exit code 2 (invalid character in path).
+
+    Args:
+        arg: Raw argument string or value.
+
+    Returns:
+        Sanitized argument string.
+    """
+    if arg is None or isinstance(arg, bool):
+        return ""
+    if not isinstance(arg, str):
+        arg = str(arg)
+
+    arg = _strip_quotes(arg)
+    if not arg:
+        return ""
+
+    # Check for key=value or key:value parameter (e.g. /dir="C:\Path", --prefix='C:\Games', -D="val")
+    for sep in ("=", ":"):
+        if sep in arg:
+            key, s, val = arg.partition(sep)
+            val = _strip_quotes(val)
+            return f"{key}{s}{val}"
+
+    return arg
+
+
+def parse_and_sanitize_arguments(args_input: Union[str, Sequence[Any], Any, None]) -> List[str]:
+    """
+    Parses and sanitizes command-line arguments from a list, tuple, string, or None.
+
+    If given a string (e.g. '/dir="C:\\Path" /SILENT'), splits it into individual
+    tokens while respecting quoted sub-strings, and sanitizes each token.
+    If given a list or sequence, sanitizes each argument in the sequence.
+
+    Args:
+        args_input: Raw arguments as list, sequence, string, or None.
+
+    Returns:
+        List of sanitized argument strings.
+    """
+    if args_input is None or isinstance(args_input, bool):
+        return []
+
+    if isinstance(args_input, (list, tuple, set)):
+        result: List[str] = []
+        for item in args_input:
+            if item is None or isinstance(item, bool):
+                continue
+            sanitized = sanitize_argument(item)
+            if sanitized:
+                result.append(sanitized)
+        return result
+
+    if isinstance(args_input, (int, float)):
+        return [str(args_input)]
+
+    if isinstance(args_input, str):
+        cleaned = args_input.strip()
+        if not cleaned:
+            return []
+        pattern = r"""(?:[^\s"']|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')+"""
+        matches = re.findall(pattern, cleaned)
+        if matches:
+            return [sanitize_argument(m) for m in matches if sanitize_argument(m)]
+        sanitized = sanitize_argument(cleaned)
+        return [sanitized] if sanitized else []
+
+    return []
 
 # Standard configuration descriptor filenames in order of preference
 CONFIG_FILENAMES: Sequence[str] = (
@@ -284,10 +383,8 @@ def parse_disk_config(disk_root: str) -> Optional[GOGDiskConfig]:
         setup_args_raw = setup_data.get("arguments", setup_data.get("args"))
         if setup_args_raw is None:
             setup_args = []
-        elif isinstance(setup_args_raw, list):
-            setup_args = [str(a) for a in setup_args_raw]
-        elif isinstance(setup_args_raw, str):
-            setup_args = [setup_args_raw]
+        elif isinstance(setup_args_raw, (list, str)):
+            setup_args = parse_and_sanitize_arguments(setup_args_raw)
         else:
             logger.debug("Setup 'arguments' has invalid type at %s", config_path)
             return None
@@ -331,10 +428,8 @@ def parse_disk_config(disk_root: str) -> Optional[GOGDiskConfig]:
         launcher_args_raw = launcher_data.get("arguments", launcher_data.get("args"))
         if launcher_args_raw is None:
             launcher_args = []
-        elif isinstance(launcher_args_raw, list):
-            launcher_args = [str(a) for a in launcher_args_raw]
-        elif isinstance(launcher_args_raw, str):
-            launcher_args = [launcher_args_raw]
+        elif isinstance(launcher_args_raw, (list, str)):
+            launcher_args = parse_and_sanitize_arguments(launcher_args_raw)
         else:
             logger.debug("Launcher 'arguments' has invalid type at %s", config_path)
             return None

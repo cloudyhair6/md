@@ -495,11 +495,11 @@ class GOGDiskMonitorApp:
 
             logger.info("Starting GOG Disk Monitor App (poll_interval=%.2fs, headless=%s)", self.poll_interval, self.headless)
 
-            # Start drive monitoring thread
+            # Start drive monitoring thread in background
             self.drive_monitor.start(scan_existing_at_startup=self.scan_on_startup)
 
-            # Start system tray
-            self.tray.start(detached=not block)
+            # Start system tray in background thread to keep event loop and drive monitoring unblocked
+            self.tray.start(detached=True)
 
         if block:
             try:

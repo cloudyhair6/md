@@ -98,6 +98,14 @@ class TestDeploymentUtilities(unittest.TestCase):
             parse_arguments_list('/DIR="C:\\GOG Games\\Witcher" /NOICONS'),
             ['/DIR="C:\\GOG Games\\Witcher"', "/NOICONS"],
         )
+        self.assertEqual(
+            parse_arguments_list('"/dir=\\"C:\\Program Files (x86)\\GOG Games\\Game\\"" /SILENT'),
+            ['"/dir=\\"C:\\Program Files (x86)\\GOG Games\\Game\\""', "/SILENT"],
+        )
+        self.assertEqual(
+            parse_arguments_list('\'/dir="C:\\Path with spaces"\' /SILENT'),
+            ['\'/dir="C:\\Path with spaces"\'', "/SILENT"],
+        )
         self.assertEqual(parse_arguments_list(["-dx12", "--fullscreen"]), ["-dx12", "--fullscreen"])
         self.assertEqual(parse_arguments_list(("/OPT1", "/OPT2")), ["/OPT1", "/OPT2"])
         self.assertEqual(parse_arguments_list(123), ["123"])

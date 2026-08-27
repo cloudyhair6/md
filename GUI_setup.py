@@ -138,7 +138,9 @@ try:
         SetupConfig,
         find_disk_icon,
         normalize_disk_root,
+        parse_and_sanitize_arguments,
         parse_disk_config,
+        sanitize_argument,
     )
 except ImportError:
     # Standalone execution fallback if package not installed in site-packages
@@ -151,7 +153,9 @@ except ImportError:
         SetupConfig,
         find_disk_icon,
         normalize_disk_root,
+        parse_and_sanitize_arguments,
         parse_disk_config,
+        sanitize_argument,
     )
 
 logger = logging.getLogger("gog_disk_setup")
@@ -229,7 +233,7 @@ def parse_arguments_list(args_input: Union[str, Sequence[Any], Any, None]) -> Li
         cleaned = args_input.strip()
         if not cleaned:
             return []
-        pattern = r'(?:[^\s"\']|"[^"]*"|\'[^\']*\')+'
+        pattern = r"""(?:[^\s"']|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')+"""
         matches = re.findall(pattern, cleaned)
         if matches:
             return matches

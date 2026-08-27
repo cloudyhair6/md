@@ -19,6 +19,8 @@ from gog_disk_monitor.config import (
     parse_disk_config,
     find_disk_icon,
     normalize_disk_root,
+    sanitize_argument,
+    parse_and_sanitize_arguments,
 )
 
 
@@ -384,6 +386,110 @@ class TestConfigParser(unittest.TestCase):
         self.assertTrue(normalize_disk_root("X:").endswith(os.sep))
         self.assertTrue(normalize_disk_root("X:\\").endswith(os.sep))
         self.assertEqual(normalize_disk_root(""), "")
+
+    def test_parse_quoted_arguments_in_setup_and_launcher(self) -> None:
+        """CFG-28: Parsing config containing quoted arguments strips literal quotes from path values."""
+        payload = {
+            "game_id": "witcher_quotes",
+            "title": "Witcher With Quotes",
+            "version": "1.0",
+            "setup": {
+                "executable": "setup.exe",
+                "arguments": [
+                    '/dir="C:\\GOG Games\\The Witcher 3"',
+                    '/SILENT',
+                    '/OPTION="value with spaces"',
+                ],
+            },
+            "launcher": {
+                "executable": "game.exe",
+                "arguments": ['--install-dir="C:\\Program Files\\Game"'],
+            },
+        }
+        self._write_config("gog_game.json", payload)
+
+        config = parse_disk_config(self.disk_root)
+        self.assertIsNotNone(config)
+        self.assertEqual(
+            config.setup.arguments,
+            [
+                r"/dir=C:\GOG Games\The Witcher 3",
+                "/SILENT",
+                "/OPTION=value with spaces",
+            ],
+        )
+        self.assertEqual(
+            config.launcher.arguments,
+            [r"--install-dir=C:\Program Files\Game"],
+        )
+
+    def test_parse_single_string_with_quoted_arguments(self) -> None:
+        """CFG-29: Parsing single-string arguments field containing quoted /dir switch."""
+        payload = {
+            "game_id": "string_args_game",
+            "title": "String Args Game",
+            "version": "1.0",
+            "setup": {
+                "executable": "setup.exe",
+                "arguments": '/dir="C:\\Custom Path" /SILENT /VERYSILENT',
+            },
+            "launcher": {
+                "executable": "game.exe",
+                "arguments": '-fullscreen -custom="val"',
+            },
+        }
+        self._write_config("gog_game.json", payload)
+
+        config = parse_disk_config(self.disk_root)
+        self.assertIsNotNone(config)
+        self.assertEqual(
+            config.setup.arguments,
+            [r"/dir=C:\Custom Path", "/SILENT", "/VERYSILENT"],
+        )
+        self.assertEqual(
+            config.launcher.arguments,
+            ["-fullscreen", "-custom=val"],
+        )
+
+    def test_sanitize_argument_unit_variations(self) -> None:
+        """CFG-30: Direct unit testing of sanitize_argument on various quoting conventions."""
+        self.assertEqual(sanitize_argument('/dir="C:\\Path"'), r"/dir=C:\Path")
+        self.assertEqual(sanitize_argument('/DIR="C:\\Games\\Witcher 3"'), r"/DIR=C:\Games\Witcher 3")
+        self.assertEqual(sanitize_argument('"/dir=\\"C:\\Path\\""'), r"/dir=C:\Path")
+        self.assertEqual(sanitize_argument("'/dir=\"C:\\Path\"'"), r"/dir=C:\Path")
+        self.assertEqual(sanitize_argument("/dir='C:\\Path'"), r"/dir=C:\Path")
+        self.assertEqual(sanitize_argument('/dir="C:\\Games\\W3\\"'), "/dir=C:\\Games\\W3\\")
+        self.assertEqual(sanitize_argument('/DIR:"C:\\Games\\W3"'), r"/DIR:C:\Games\W3")
+        self.assertEqual(sanitize_argument('--prefix="C:\\Program Files"'), r"--prefix=C:\Program Files")
+        self.assertEqual(sanitize_argument('-D="custom value"'), "-D=custom value")
+        self.assertEqual(sanitize_argument("/SILENT"), "/SILENT")
+        self.assertEqual(sanitize_argument('"C:\\Games\\Setup.exe"'), r"C:\Games\Setup.exe")
+        self.assertEqual(sanitize_argument('"/dir=\\"C:\\GOG Gry\\Wiedźmin 3\\""'), r"/dir=C:\GOG Gry\Wiedźmin 3")
+        self.assertEqual(sanitize_argument('\"\"/dir=\"\"C:\\Path\"\"\"\"'), r"/dir=C:\Path")
+        self.assertEqual(sanitize_argument('/dir=""'), "/dir=")
+        self.assertEqual(sanitize_argument(None), "")
+        self.assertEqual(sanitize_argument(""), "")
+
+    def test_parse_and_sanitize_arguments_complex_variations(self) -> None:
+        """CFG-31: parse_and_sanitize_arguments with mixed sequences, numbers, and unicode."""
+        self.assertEqual(
+            parse_and_sanitize_arguments(['/dir="C:\\Path"', '--option="val"', 42]),
+            [r"/dir=C:\Path", "--option=val", "42"],
+        )
+        self.assertEqual(
+            parse_and_sanitize_arguments('/dir="C:\\Program Files\\Game" /SILENT --lang="pl-PL"'),
+            [r"/dir=C:\Program Files\Game", "/SILENT", "--lang=pl-PL"],
+        )
+        self.assertEqual(
+            parse_and_sanitize_arguments('"/dir=\\"C:\\Program Files (x86)\\GOG Games\\Game\\"" /SILENT'),
+            [r"/dir=C:\Program Files (x86)\GOG Games\Game", "/SILENT"],
+        )
+        self.assertEqual(
+            parse_and_sanitize_arguments('\'/dir="C:\\Path with spaces"\' /SILENT'),
+            [r"/dir=C:\Path with spaces", "/SILENT"],
+        )
+        self.assertEqual(parse_and_sanitize_arguments(None), [])
+        self.assertEqual(parse_and_sanitize_arguments(False), [])
 
 
 class TestIconResolver(unittest.TestCase):
